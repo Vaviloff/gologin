@@ -645,9 +645,15 @@ class GoLogin {
         params = params.concat(this.extra_params);
       }
 
-      const child = execFile(ORBITA_BROWSER, params, {env});
-      // const child = spawn(ORBITA_BROWSER, params, { env, shell: true });
+      if (this.xvfb) {
+        const child = execFile(ORBITA_BROWSER, params, {env});
+      } else {
+        const child = execFile('xvfb-run', [ORBITA_BROWSER, ...params], {env});
+      }
+
       child.stdout.on('data', (data) => debug(data.toString()));
+      child.stderr.on('data', (data) => debug(`ERR: ${data.toString()}`));
+
       debug('SPAWN CMD', ORBITA_BROWSER, params.join(" "));      
     }
 
