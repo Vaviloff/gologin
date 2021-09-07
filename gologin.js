@@ -47,6 +47,7 @@ class GoLogin {
     this.uploadCookiesToServer = options.uploadCookiesToServer || false;
     this.writeCookesFromServer = options.writeCookesFromServer || true;
     this.cookiesFilePath = path.join(os.tmpdir(), `gologin_profile_${this.profile_id}`, 'Default', 'Cookies');
+    this.xvfb = options.xvfb || false;
 
     if (options.tmpdir) {
       this.tmpdir = options.tmpdir;
