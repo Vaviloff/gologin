@@ -646,10 +646,10 @@ class GoLogin {
       }
 
       let child;
-      if (this.xvfb) {
-        child = execFile(ORBITA_BROWSER, params, {env});
+      if (this.xvfb === true) {
+        child = execFile('xvfb-run', [ORBITA_BROWSER, ...params], {env});        
       } else {
-        child = execFile('xvfb-run', [ORBITA_BROWSER, ...params], {env});
+        child = execFile(ORBITA_BROWSER, params, {env});        
       }
 
       child.stdout.on('data', (data) => debug(data.toString()));
