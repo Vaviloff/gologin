@@ -648,7 +648,7 @@ class GoLogin {
 
       let child;
       if (this.xvfb === true) {
-        child = execFile('xvfb-run', [ORBITA_BROWSER, ...params], {env});        
+        child = execFile('xvfb-run', ['-a', ORBITA_BROWSER, ...params], {env});        
       } else {
         child = execFile(ORBITA_BROWSER, params, {env});        
       }
