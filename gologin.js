@@ -356,7 +356,6 @@ class GoLogin {
       proxy = null;
     }
     this.proxy = proxy;
-    this.profile_name = name;
 
     await this.getTimeZone(proxy);
 
@@ -370,6 +369,7 @@ class GoLogin {
       accuracy
     };
     profile.geoLocation = this.getGeolocationParams(profileGeolocation, tzGeoLocation);
+    profile.name = name;
 
     profile.webRtc = {
       mode: _.get(profile, 'webRTC.mode') === 'alerted' ? 'public' : _.get(profile, 'webRTC.mode'),
@@ -558,7 +558,6 @@ class GoLogin {
     const profile_path = this.profilePath();
     
     let proxy = this.proxy;
-    let profile_name = this.profile_name;
     proxy = `${proxy.mode}://${proxy.host}:${proxy.port}`;
 
     const env = {};
@@ -568,7 +567,7 @@ class GoLogin {
     const tz = await this.getTimeZone(this.proxy);
     env['TZ'] = tz;
 
-    let params = [`--proxy-server=${proxy}`, `--user-data-dir=${profile_path}`, `--password-store=basic`, `--tz=${tz}`, `--gologin-profile=${profile_name}`, `--lang=en`]
+    let params = [`--proxy-server=${proxy}`, `--user-data-dir=${profile_path}`, `--password-store=basic`, `--tz=${tz}`, `--lang=en`]
     if (Array.isArray(this.extra_params) && this.extra_params.length) {
       params = params.concat(this.extra_params);
     }
@@ -583,14 +582,13 @@ class GoLogin {
   async spawnBrowser() {
 
     let remote_debugging_port = this.remote_debugging_port;
-    if(remote_debugging_port == 0){
+    if(!remote_debugging_port){
       remote_debugging_port = await this.getRandomPort();
     } 
     
     const profile_path = this.profilePath();
     
     let proxy = this.proxy;
-    let profile_name = this.profile_name;
     let proxy_host = '';
     if (proxy) {
       proxy_host = this.proxy.host;
@@ -613,20 +611,22 @@ class GoLogin {
       debug('RUNNING', script_path, ORBITA_BROWSER, remote_debugging_port, proxy, profile_path, this.vnc_port);
       execFile(
         script_path,
-        [ORBITA_BROWSER, remote_debugging_port, proxy, profile_path, this.vnc_port, tz, profile_name],
+        [ORBITA_BROWSER, remote_debugging_port, proxy, profile_path, this.vnc_port, tz],
         { env }
       );
     } else {
       const [splittedLangs] = this.language.split(';');
-      const browserLangs = splittedLangs.split(',');
-      const browserLang = browserLangs[browserLangs.length - 1];
+      let [browserLang] = splittedLangs.split(',');
+      if (process.platform === 'darwin') {
+        browserLang = 'en-US';
+      }
+
       let params = [
         `--remote-debugging-port=${remote_debugging_port}`,
         `--user-data-dir=${profile_path}`, 
         `--password-store=basic`, 
-        `--tz=${tz}`, 
-        `--gologin-profile='${profile_name}'`, 
-        `--lang=${browserLang || 'en'}`,
+        `--tz=${tz}`,
+        `--lang=${browserLang}`,
       ];
 
       if (this.fontsMasking) {
@@ -930,9 +930,15 @@ class GoLogin {
   };
 
   async postCookies(profileId, cookies) {
+    const formattedCookies = cookies.map(cookie => {
+      if (!['no_restriction', 'lax', 'strict', 'unspecified'].includes(cookie.sameSite)) {
+        cookie.sameSite = 'unspecified';
+      }
+    });
+
     const response = await BrowserUserDataManager.uploadCookies({
       profileId,
-      cookies,
+      cookies: formattedCookies,
       API_BASE_URL: API_URL,
       ACCESS_TOKEN: this.access_token,
     });
