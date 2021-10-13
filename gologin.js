@@ -934,6 +934,8 @@ class GoLogin {
       if (!['no_restriction', 'lax', 'strict', 'unspecified'].includes(cookie.sameSite)) {
         cookie.sameSite = 'unspecified';
       }
+
+      return cookie;
     });
 
     const response = await BrowserUserDataManager.uploadCookies({
