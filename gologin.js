@@ -48,8 +48,9 @@ class GoLogin {
     this.writeCookesFromServer = options.writeCookesFromServer || true;
     this.cookiesFilePath = path.join(os.tmpdir(), `gologin_profile_${this.profile_id}`, 'Default', 'Cookies');
     this.remote_debugging_port = options.remote_debugging_port || 0;
+    this.timezone = options.timezone;
     this.xvfb = options.xvfb || false;
-    
+
     if (options.tmpdir) {
       this.tmpdir = options.tmpdir;
       if (!fs.existsSync(this.tmpdir)) {
@@ -82,10 +83,10 @@ class GoLogin {
   	}
   }
 
-  async getNewFingerPrint() {
+  async getNewFingerPrint(os) {
     debug('GETTING FINGERPRINT');
 
-    const fpResponse = await requests.get(`${API_URL}/browser/fingerprint?os=lin`, {
+    const fpResponse = await requests.get(`${API_URL}/browser/fingerprint?os=${os}`, {
       json: true,
       headers: {
         'Authorization': `Bearer ${this.access_token}`,
@@ -124,6 +125,11 @@ class GoLogin {
   	if (profileResponse.statusCode !== 200) {
   		throw new Error(`Gologin /browser/${id} response error ${profileResponse.statusCode}`);
   	}
+
+    if(profileResponse.statusCode == 401){
+      throw new Error("invalid token");
+    }    
+
   	return JSON.parse(profileResponse.body);
   }
 
@@ -357,7 +363,10 @@ class GoLogin {
     }
     this.proxy = proxy;
 
-    await this.getTimeZone(proxy);
+    await this.getTimeZone(proxy).catch((e) => {
+      console.error('Proxy Error. Check it and try again.');
+      throw e;
+    });
 
     const [latitude, longitude] = this._tz.ll;
     const accuracy = this._tz.accuracy;
@@ -489,6 +498,12 @@ class GoLogin {
   }
 
   async getTimeZone(proxy) {
+    if(this.timezone){
+      debug('getTimeZone from options', this.timezone);
+      this._tz = this.timezone;
+      return this._tz.timezone;
+    }
+
     let data = null;
     if (proxy) {
       if (proxy.mode.includes('socks')) {
@@ -497,9 +512,9 @@ class GoLogin {
 
       const proxyUrl = `${proxy.mode}://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
       debug('getTimeZone start https://time.gologin.com', proxyUrl);
-      data = await requests.get('https://time.gologin.com', { proxy: proxyUrl });
+      data = await requests.get('https://time.gologin.com', { proxy: proxyUrl, timeout: 10 * 1000, maxAttempts: 2 });
     } else {
-      data = await requests.get('https://time.gologin.com');
+      data = await requests.get('https://time.gologin.com', { timeout: 10 * 1000, maxAttempts: 2 });
     }
     debug('getTimeZone finish', data.body);
     this._tz = JSON.parse(data.body);
@@ -544,6 +559,7 @@ class GoLogin {
       }).on('error', (err) => reject(err));
     });
 
+    console.log('checkData:', checkData);
     body = checkData.body || {};
     if (!body.ip && checkData.statusCode.toString().startsWith('4')) {
       throw checkData;
@@ -564,7 +580,10 @@ class GoLogin {
     Object.keys(process.env).forEach((key) => {
       env[key] = process.env[key];
     });
-    const tz = await this.getTimeZone(this.proxy);
+    const tz = await this.getTimeZone(this.proxy).catch((e) => {
+      console.error('Proxy Error. Check it and try again.');
+      throw e;
+    });
     env['TZ'] = tz;
 
     let params = [`--proxy-server=${proxy}`, `--user-data-dir=${profile_path}`, `--password-store=basic`, `--tz=${tz}`, `--lang=en`]
@@ -580,7 +599,6 @@ class GoLogin {
   }
 
   async spawnBrowser() {
-
     let remote_debugging_port = this.remote_debugging_port;
     if(!remote_debugging_port){
       remote_debugging_port = await this.getRandomPort();
@@ -603,7 +621,10 @@ class GoLogin {
     Object.keys(process.env).forEach((key) => {
       env[key] = process.env[key];
     });
-    const tz = await this.getTimeZone(this.proxy);
+    const tz = await this.getTimeZone(this.proxy).catch((e) => {
+      console.error('Proxy Error. Check it and try again.');
+      throw e;
+    });
     env['TZ'] = tz;
 
     if (this.vnc_port) {
@@ -833,6 +854,15 @@ class GoLogin {
     debug('createProfile', options);
 
     const fingerprint = await this.getRandomFingerprint(options);
+    debug("fingerprint=", fingerprint)
+    
+    if(fingerprint.statusCode == 500){
+      throw new Error("no valid random fingerprint check os param");
+    }
+
+    if(fingerprint.statusCode == 401){
+      throw new Error("invalid token");
+    }
 
     const { navigator, fonts, webGLMetadata, webRTC } = fingerprint;
     let deviceMemory = navigator.deviceMemory || 2;
@@ -1068,6 +1098,11 @@ class GoLogin {
         'Authorization': `Bearer ${this.access_token}`
       }
     });
+
+    if(profileResponse.statusCode == 401){
+      throw new Error("invalid token");
+    }
+
     debug('profileResponse', profileResponse.statusCode, profileResponse.body);
     if (profileResponse.statusCode !== 202) {
       return {'status': 'failure', 'code':  profileResponse.statusCode};
