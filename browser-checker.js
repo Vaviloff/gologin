@@ -73,6 +73,12 @@ class BrowserChecker {
       return this.downloadBrowser();
     }
 
+    console.log(`NOTICE: New Orbita ${browserLatestVersion} is available`);
+    return;
+
+    // This interactive mode breaks Gologin 
+    // on new version release 
+    // when working in containers
     return new Promise(resolve => {
       const rl = readline.createInterface(process.stdin, process.stdout);
       const timeout = setTimeout(() => {
