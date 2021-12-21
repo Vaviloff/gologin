@@ -8,7 +8,7 @@ const rimraf = util.promisify(require('rimraf'));
 const exec = util.promisify(require('child_process').exec);
 const { spawn, execFile } = require('child_process');
 const FormData = require('form-data');
-const socks5Http = require('socks5-https-client');
+const ProxyAgent = require('simple-proxy-agent');
 const decompress = require('decompress');
 const decompressUnzip = require('decompress-unzip');
 const path = require('path');
@@ -18,6 +18,7 @@ const BrowserChecker = require('./browser-checker');
 const { BrowserUserDataManager } = require('./browser-user-data-manager');
 const { CookiesManager } = require('./cookies-manager');
 const fontsCollection = require('./fonts');
+const https = require('https');
 
 const SEPARATOR = path.sep;
 const API_URL = 'https://api.gologin.com';
@@ -46,7 +47,6 @@ class GoLogin {
     this.browserChecker = new BrowserChecker();
     this.uploadCookiesToServer = options.uploadCookiesToServer || false;
     this.writeCookesFromServer = options.writeCookesFromServer || true;
-    this.cookiesFilePath = path.join(os.tmpdir(), `gologin_profile_${this.profile_id}`, 'Default', 'Cookies');
     this.remote_debugging_port = options.remote_debugging_port || 0;
     this.timezone = options.timezone;
     this.xvfb = options.xvfb || false;
@@ -59,6 +59,7 @@ class GoLogin {
       }
     }
 
+    this.cookiesFilePath = path.join(this.tmpdir, `gologin_profile_${this.profile_id}`, 'Default', 'Cookies');
     this.profile_zip_path = path.join(this.tmpdir, `gologin_${this.profile_id}.zip`);
     debug('INIT GOLOGIN', this.profile_id);
   }
@@ -67,6 +68,7 @@ class GoLogin {
 
   async setProfileId(profile_id) {
     this.profile_id = profile_id;
+    this.cookiesFilePath = path.join(this.tmpdir, `gologin_profile_${this.profile_id}`, 'Default', 'Cookies');
     this.profile_zip_path = path.join(this.tmpdir, `gologin_${this.profile_id}.zip`);
   }
 
@@ -123,7 +125,7 @@ class GoLogin {
   	})
     debug(profileResponse.body);
   	if (profileResponse.statusCode !== 200) {
-  		throw new Error(`Gologin /browser/${id} response error ${profileResponse.statusCode}`);
+  		throw new Error(`Gologin /browser/${id} response error ${profileResponse.statusCode} INVALID TOKEN OR PROFILE NOT FOUND`);
   	}
 
     if(profileResponse.statusCode == 401){
@@ -385,6 +387,8 @@ class GoLogin {
       publicIP: _.get(profile, 'webRTC.fillBasedOnIp') ? this._tz.ip : _.get(profile, 'webRTC.publicIp'),
       localIps: _.get(profile, 'webRTC.localIps', []),
     };
+    
+    debug('profile.webRtc=', profile.webRtc);
 
     const audioContext = profile.audioContext || {};
     const { mode: audioCtxMode = 'off', noise: audioCtxNoise } = audioContext;
@@ -498,6 +502,7 @@ class GoLogin {
   }
 
   async getTimeZone(proxy) {
+    debug('getting timeZone proxy=', proxy);
     if(this.timezone){
       debug('getTimeZone from options', this.timezone);
       this._tz = this.timezone;
@@ -505,51 +510,47 @@ class GoLogin {
     }
 
     let data = null;
-    if (proxy) {
+    if (proxy!==null && proxy.mode !== "none") {
       if (proxy.mode.includes('socks')) {
         return this.getTimezoneWithSocks(proxy);
       }
 
       const proxyUrl = `${proxy.mode}://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
       debug('getTimeZone start https://time.gologin.com', proxyUrl);
-      data = await requests.get('https://time.gologin.com', { proxy: proxyUrl, timeout: 10 * 1000, maxAttempts: 2 });
+      data = await requests.get('https://time.gologin.com', { proxy: proxyUrl, timeout: 20 * 1000, maxAttempts: 5 });
     } else {
-      data = await requests.get('https://time.gologin.com', { timeout: 10 * 1000, maxAttempts: 2 });
+      data = await requests.get('https://time.gologin.com', { timeout: 20 * 1000, maxAttempts: 5 });
     }
     debug('getTimeZone finish', data.body);
     this._tz = JSON.parse(data.body);
     return this._tz.timezone;
   }
 
-  async getTimezoneWithSocks(proxy) {
-    const { host, port, username, password } = proxy;
+  async getTimezoneWithSocks(params) {
+    const { mode = 'http', host, port, username = '', password = '' } = params;
     let body;
 
+    let proxy = mode + '://';
+    if (username) {
+      const resultPassword = password ? ':' + password + '@' : '@';
+      proxy += username + resultPassword;
+    }
+    proxy += host + ':' + port;
+
+    const agent = new ProxyAgent(proxy, { tunnel: true, timeout: 10000 });
+
     const checkData = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        req.abort();
-        reject(new Error('Timeout exceeded'));
-      }, 10000);
-
-      const req = socks5Http.get({
-        hostname: 'time.gologin.com',
-        path: '/timezone',
-        socksHost: host,
-        socksPort: port,
-        socksUsername: username || '',
-        socksPassword: password || '',
-      }, (res) => {
-        res.setEncoding('utf8');
-
+      https.get('https://time.gologin.com/timezone', { agent }, (res) => {
         let resultResponse = '';
         res.on('data', (data) => resultResponse += data);
 
         res.on('end', () => {
-          clearTimeout(timer);
           let parsedData;
           try {
             parsedData = JSON.parse(resultResponse);
-          } catch (e) {}
+          } catch (e) {
+            reject(e);
+          }
 
           resolve({
             ...res,
@@ -559,14 +560,13 @@ class GoLogin {
       }).on('error', (err) => reject(err));
     });
 
-    console.log('checkData:', checkData);
+    // console.log('checkData:', checkData);
     body = checkData.body || {};
     if (!body.ip && checkData.statusCode.toString().startsWith('4')) {
       throw checkData;
     }
     debug('getTimeZone finish', body.body);
     this._tz = body;
-
     return this._tz.timezone;
   }
 
@@ -705,7 +705,7 @@ class GoLogin {
     await rimraf(path.join(this.tmpdir, `gologin_${this.profile_id}_upload.zip`));
   }
 
-  async stopAndCommit(options, local= false) {
+  async stopAndCommit(options, local = false) {
     if (this.is_stopping) {
       return true;
     }
@@ -887,9 +887,12 @@ class GoLogin {
         mode: 'alerted',
       },
     };
-
+    let user_agent = options.navigator?.userAgent;
+    let orig_user_agent = json.navigator.userAgent;
     Object.keys(options).map((e)=>{ json[e] = options[e] });
-
+    if(user_agent=='random'){
+      json.navigator.userAgent = orig_user_agent;
+    }
     // console.log('profileOptions', json);
 
     const response = await requests.post(`${API_URL}/browser`, {
@@ -899,7 +902,15 @@ class GoLogin {
       },
       json,
     });
-    // console.log(JSON.stringify(response.body));
+
+    if(response.body.statusCode==400){
+      throw new Error(`gologin failed account creation with status code, ${data.statusCode} DATA  ${JSON.stringify(response.body.message)}`);
+    }
+
+    if(response.body.statusCode==500){
+      throw new Error(`gologin failed account creation with status code, ${data.statusCode}`);
+    }
+    debug(JSON.stringify(response.body));
     return response.body.id;
   }
 
@@ -1034,6 +1045,12 @@ class GoLogin {
     if (!this.executablePath) {
      await this.checkBrowser();
     }
+    
+    const ORBITA_BROWSER = this.executablePath || this.browserChecker.getOrbitaPath;
+
+    if(!fs.existsSync(ORBITA_BROWSER)){
+      throw new Error(`Orbita browser is not exists on path ${ORBITA_BROWSER}, check executablePath param`);
+    }
 
     await this.createStartup();
     // await this.createBrowserExtension();
@@ -1057,12 +1074,12 @@ class GoLogin {
       return this.stopRemote();
     }
 
-    await this.stopAndCommit(false, {});
+    await this.stopAndCommit({ posting: false }, false);
   }
 
   async stopLocal(options) {
-    const opts = options || {posting: false};
-    await this.stopAndCommit(true, opts.posting);
+    const opts = options || { posting: false };
+    await this.stopAndCommit(options, true);
   }
 
   async waitDebuggingUrl(delay_ms, try_count=0) {
@@ -1109,9 +1126,29 @@ class GoLogin {
     }
     
     if (profileResponse.body === 'ok') {
+      const profile = await this.getProfile();
+      const { navigator = {}, fonts, os: profileOs  } = profile;
+      this.fontsMasking = fonts?.enableMasking;
+      this.profileOs = profileOs;
+      this.differentOs =
+        profileOs !== 'android' && (
+          OS_PLATFORM === 'win32' && profileOs !== 'win' ||
+          OS_PLATFORM === 'darwin' && profileOs !== 'mac' ||
+          OS_PLATFORM === 'linux' && profileOs !== 'lin'
+        );
+
+      const {
+        resolution = '1920x1080',
+        language = 'en-US,en;q=0.9',
+      } = navigator;
+      this.language = language;
+      const [screenWidth, screenHeight] = resolution.split('x');
+      this.resolution = {
+        width: parseInt(screenWidth, 10),
+        height: parseInt(screenHeight, 10),
+      };
+
       let wsUrl = await this.waitDebuggingUrl(delay_ms);
-      // const wsUrl = `wss://${this.profile_id}.orbita.gologin.app`
-      // const wsUrl = `wss://${this.profile_id}.orbita.gologin.com`
       return { 'status': 'success', wsUrl }
     }
 

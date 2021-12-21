@@ -170,9 +170,9 @@ class GoLogin(object):
         proxy = self.proxy
         if proxy:            
             proxies = {proxy.get('mode'): self.formatProxyUrlPassword(proxy)}
-            data = requests.get('https://time.gologin.app', proxies=proxies)
+            data = requests.get('https://time.gologin.com', proxies=proxies)
         else:
-            data = requests.get('https://time.gologin.app')
+            data = requests.get('https://time.gologin.com')
         return json.loads(data.content.decode('utf-8'))
 
 
@@ -305,9 +305,8 @@ class GoLogin(object):
 
     def updatePreferences(self):
         pref_file = os.path.join(self.profile_path, 'Default/Preferences')
-        pfile = open(pref_file, 'r')
-        preferences = json.load(pfile)    
-        pfile.close()  
+        with open(pref_file, 'r', encoding="utf-8") as pfile:
+            preferences = json.load(pfile)    
         profile = self.profile
         proxy = self.profile.get('proxy')
         # print('proxy=', proxy)
@@ -423,9 +422,12 @@ class GoLogin(object):
     def update(self, options):
         self.profile_id = options.get('id')
         profile = self.getProfile()
+        #print("profile", profile)
         for k,v in options.items():
             profile[k] = v
-        return json.loads(requests.put(API_URL + '/browser/' + profile_id, headers=self.headers(), json=profile).content.decode('utf-8'))
+        resp = requests.put(API_URL + '/browser/' + self.profile_id, headers=self.headers(), json=profile).content.decode('utf-8')
+        #print("update", resp)
+        #return json.loads(resp)
 
     def waitDebuggingUrl(self, delay_s, try_count=3):
         url = 'https://' + self.profile_id + '.orbita.gologin.com/json/version'

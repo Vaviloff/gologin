@@ -29,10 +29,11 @@ class CookiesManager {
     const chunckedCookiesArr = this.chunk(cookiesArr, MAX_SQLITE_VARIABLES);
 
     return chunckedCookiesArr.map((cookies) => {
-      const queryPlaceholders = cookies.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-      const query = `insert or replace into cookies (creation_utc, host_key, name, value, path, expires_utc, is_secure, is_httponly, last_access_utc, is_persistent, encrypted_value, samesite, has_expires) values ${queryPlaceholders}`;
+      const queryPlaceholders = cookies.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const query = `insert or replace into cookies (creation_utc, top_frame_site_key, host_key, name, value, path, expires_utc, is_secure, is_httponly, last_access_utc, is_persistent, encrypted_value, samesite, has_expires) values ${queryPlaceholders}`;
       const queryParams = cookies.flatMap((cookie) => {
         const creationDate = cookie.creationDate ? cookie.creationDate : this.unixToLDAP(todayUnix);
+        let expirationDate = cookie.session ? 0 : this.unixToLDAP(cookie.expirationDate);
         const encryptedValue = cookie.value;
         const samesite = Object.keys(SAME_SITE).find((key) => SAME_SITE[key] === (cookie.sameSite || '-1'));
         const isSecure =
@@ -40,7 +41,6 @@ class CookiesManager {
         let isPersistent = [undefined, null].includes(cookie.session)
           ? Number(expirationDate !== 0)
           : Number(!cookie.session);
-        let expirationDate = cookie.session ? 0 : this.unixToLDAP(cookie.expirationDate);
 
         if (/^(\.)?mail.google.com$/.test(cookie.domain) && cookie.name === 'COMPASS') {
           expirationDate = 0;
@@ -49,6 +49,7 @@ class CookiesManager {
 
         return [
           creationDate,
+          '', // top_frame_site_key
           cookie.domain,
           cookie.name,
           '', // value
