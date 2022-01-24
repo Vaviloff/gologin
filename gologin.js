@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const util = require('util');
 const rimraf = util.promisify(require('rimraf'));
+const { access, unlink, writeFile, readFile } = require('fs').promises;
 const exec = util.promisify(require('child_process').exec);
 const { spawn, execFile } = require('child_process');
 const FormData = require('form-data');
@@ -12,7 +13,7 @@ const ProxyAgent = require('simple-proxy-agent');
 const decompress = require('decompress');
 const decompressUnzip = require('decompress-unzip');
 const path = require('path');
-const shell = require('shelljs');
+const zipdir = require('zip-dir');
 
 const BrowserChecker = require('./browser-checker');
 const { BrowserUserDataManager } = require('./browser-user-data-manager');
@@ -55,7 +56,7 @@ class GoLogin {
       this.tmpdir = options.tmpdir;
       if (!fs.existsSync(this.tmpdir)) {
         debug('making tmpdir', this.tmpdir);
-        shell.mkdir('-p', this.tmpdir);
+        fs.mkdirSync(this.tmpdir, { recursive: true })
       }
     }
 
@@ -128,7 +129,7 @@ class GoLogin {
   		throw new Error(`Gologin /browser/${id} response error ${profileResponse.statusCode} INVALID TOKEN OR PROFILE NOT FOUND`);
   	}
 
-    if(profileResponse.statusCode == 401){
+    if (profileResponse.statusCode === 401) {
       throw new Error("invalid token");
     }    
 
@@ -136,77 +137,86 @@ class GoLogin {
   }
 
   async emptyProfile() {
-  	return fs.readFileSync(path.resolve(__dirname, 'gologin_zeroprofile.b64')).toString();
+    return readFile(path.resolve(__dirname, 'gologin_zeroprofile.b64')).then(res => res.toString());
   }
 
   async getProfileS3(s3path) {
-    const token = this.access_token;
-    debug('getProfileS3 token=', token, 'profile=', this.profile_id, 's3path=', s3path);
-    if (s3path) { //загрузка профиля из публичного бакета s3 быстрее
-      const s3url = `https://gprofiles.gologin.com/${s3path}`.replace(/\s+/mg, '+');
-      debug('loading profile from public s3 bucket, url=', s3url);
-      const profileResponse = await requests.get(s3url, {
-        encoding: null
-      });
-      if (profileResponse.statusCode !== 200) {
-        debug(`Gologin S3 BUCKET ${s3url} response error ${profileResponse.statusCode}  - use empty`);
-        return '';
-      }
-      return Buffer.from(profileResponse.body);
+    if (!s3path) {
+      throw new Error('s3path not found');
     }
 
-    debug('old-way loading profile');
-    const profileResponse = await requests.get(`${API_URL}/browser/${this.profile_id}/profile-s3`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
+    const token = this.access_token;
+    debug('getProfileS3 token=', token, 'profile=', this.profile_id, 's3path=', s3path);
+
+    const s3url = `https://gprofiles.gologin.com/${s3path}`.replace(/\s+/mg, '+');
+    debug('loading profile from public s3 bucket, url=', s3url);
+    const profileResponse = await requests.get(s3url, {
       encoding: null
     });
+
     if (profileResponse.statusCode !== 200) {
-      debug(`Gologin /browser/${this.profile_id} response error ${profileResponse.statusCode}  - use empty`);
+      debug(`Gologin S3 BUCKET ${s3url} response error ${profileResponse.statusCode}  - use empty`);
       return '';
     }
+
     return Buffer.from(profileResponse.body);
   }
 
-  async postFile(fileName, fileBody) {
-    debug('POSTING FILE', fileBody.length);
-    const fd = new FormData();
-    const boundary = fd.getBoundary();
-    const body = Buffer.concat([
-      Buffer.from('--'),
-      Buffer.from(boundary),
-      Buffer.from('\r\n'),
-      Buffer.from(`Content-Disposition: form-data; name="profile"; filename="${fileName}"`),
-      Buffer.from('\r\n'),
-      Buffer.from('\r\n'),
-      Buffer.from(fileBody),
-      Buffer.from('\r\n'),
-      Buffer.from('--'),
-      Buffer.from(boundary),
-      Buffer.from('--'),
-      Buffer.from('\r\n')
-    ]);
-    await new Promise((resolve) => {
-      let options = {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${this.access_token}`,
-          'Content-Type': 'multipart/form-data; boundary=' + boundary,
-          'Content-Length': body.length
-        },
-        body: body,
-        url: `${API_URL}/browser/${this.profile_id}/profile-s3`,
-      };
-      requests(_.merge(options, {}), () => {
-        resolve();
-      });
+  async postFile(fileName, fileBuff) {
+    debug('POSTING FILE', fileBuff.length);
+    debug('Getting signed URL for S3');
+    const apiUrl = `${API_URL}/browser/${this.profile_id}/storage-signature`;
+
+    const signedUrl = await requests.get(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${this.access_token}`,
+        'user-agent': 'gologin-api',
+      },
+      maxAttempts: 3,
+      retryDelay: 2000,
+      timeout: 10 * 1000,
+      fullResponse: false,
     });
+
+    const [uploadedProfileUrl] = signedUrl.split('?');
+
+    console.log('Uploading profile by signed URL to S3');
+    const bodyBufferBiteLength = Buffer.byteLength(fileBuff);
+    console.log('BUFFER SIZE', bodyBufferBiteLength);
+
+    await requests.put(signedUrl, {
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Length': bodyBufferBiteLength,
+      },
+      body: fileBuff,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      maxAttempts: 3,
+      retryDelay: 2000,
+      timeout: 30 * 1000,
+      fullResponse: false,
+    });
+
+    const uploadedProfileMetadata = await requests.head(uploadedProfileUrl, {
+      maxAttempts: 3,
+      retryDelay: 2000,
+      timeout: 10 * 1000,
+      fullResponse: true,
+    });
+
+    const uploadedFileLength = +uploadedProfileMetadata.headers['content-length'];
+    if (uploadedFileLength !== bodyBufferBiteLength) {
+      console.log('Uploaded file is incorrect. Retry with China File size:', uploadedFileLength);
+      throw new Error('Uploaded file is incorrect. Retry with China File size: ' + uploadedFileLength);
+    }
+
+    console.log('Profile has been uploaded to S3 successfully');
   }
 
   async emptyProfileFolder() {
     debug('get emptyProfileFolder');
-    const profile = fs.readFileSync(path.resolve(__dirname, 'gologin_zeroprofile.zip'));
+    const profile = await readFile(path.resolve(__dirname, 'gologin_zeroprofile.zip'));
     debug('emptyProfileFolder LENGTH ::', profile.length);
     return profile;
   }
@@ -247,9 +257,8 @@ class GoLogin {
       .then(() => {
         debug('extraction done');
         debug('create uid.json');
-        fs.writeFileSync(path.join(extPath, 'uid.json'), JSON.stringify({uid: that.profile_id}, null, 2))
-        debug('uid.json created', fs.readFileSync(path.join(extPath, 'uid.json')).toString())
-        return extPath;
+        return writeFile(path.join(extPath, 'uid.json'), JSON.stringify({ uid: that.profile_id }, null, 2))
+          .then(() => extPath);
     })
       .catch(async (e) => {
         debug('orbita extension error', e);
@@ -300,19 +309,21 @@ class GoLogin {
       height: parseInt(screenHeight, 10),
     };
 
-    if (!(local && fs.existsSync(this.profile_zip_path))) {
+    const profileZipExists = await access(this.profile_zip_path).then(() => true).catch(() => false);
+    if (!(local && profileZipExists)) {
       try {
         profile_folder = await this.getProfileS3(_.get(profile, 's3Path', ''));
       }
       catch (e) {
         debug('Cannot get profile - using empty', e);
       }
+
       debug('FILE READY', this.profile_zip_path);
       if (!profile_folder.length) {
         profile_folder = await this.emptyProfileFolder();
       }
-        
-      fs.writeFileSync(this.profile_zip_path, profile_folder);
+
+      await writeFile(this.profile_zip_path, profile_folder);
 
       debug('PROFILE LENGTH', profile_folder.length);
     } else {
@@ -324,20 +335,23 @@ class GoLogin {
     await this.extractProfile(profilePath, this.profile_zip_path);
     debug('extraction done');
 
-    if (fs.existsSync(path.join(profilePath, 'SingletonLock'))) {
+    const singletonLockPath = path.join(profilePath, 'SingletonLock');
+    const singletonLockExists = await access(singletonLockPath).then(() => true).catch(() => false);
+    if (singletonLockExists) {
       debug('removing SingletonLock');
-      fs.unlinkSync(path.join(profilePath, 'SingletonLock'));
+      await unlink(singletonLockPath);
       debug('SingletonLock removed');
     }
 
     const pref_file_name = path.join(profilePath, 'Default', 'Preferences');
     debug('reading', pref_file_name);
 
-    if (!fs.existsSync(pref_file_name)) {
+    const prefFileExists = await access(pref_file_name).then(() => true).catch(() => false);
+    if (!prefFileExists) {
       debug('Preferences file not exists waiting', pref_file_name);
     }
 
-    const preferences_raw = fs.readFileSync(pref_file_name);
+    const preferences_raw = await readFile(pref_file_name);
     let preferences = JSON.parse(preferences_raw.toString());
     let proxy = _.get(profile, 'proxy');
     let name = _.get(profile, 'name');
@@ -360,6 +374,11 @@ class GoLogin {
       profile.proxy.password = _.get(profile, 'autoProxyPassword');
     }
     // console.log('proxy=', proxy);
+
+    if (proxy.mode === 'geolocation') {
+      proxy.mode = 'http';
+    }
+
     if (proxy.mode === 'none') {
       proxy = null;
     }
@@ -432,7 +451,7 @@ class GoLogin {
       await BrowserUserDataManager.composeFonts(families, profilePath, this.differentOs);
     }
 
-    fs.writeFileSync(path.join(profilePath, 'Default', 'Preferences'), JSON.stringify(_.merge(preferences, {
+    await writeFile(path.join(profilePath, 'Default', 'Preferences'), JSON.stringify(_.merge(preferences, {
       gologin
     })));
 
@@ -445,20 +464,23 @@ class GoLogin {
   }
 
   async commitProfile() {
-    const data = await this.getProfileDataToUpdate();
-    debug('begin updating', data.length);
-    if (!data.length) {
+    const dataBuff = await this.getProfileDataToUpdate();
+
+    debug('begin updating', dataBuff.length);
+    if (!dataBuff.length) {
       debug('WARN: profile zip data empty - SKIPPING PROFILE COMMIT');
 
       return;
     }
+
     try {
       debug('Patching profile');
-      await this.postFile('profile', data);
+      await this.postFile('profile', dataBuff);
     }
     catch (e) {
       debug('CANNOT COMMIT PROFILE', e);
     }
+
     debug('COMMIT COMPLETED');
   }
 
@@ -478,16 +500,16 @@ class GoLogin {
 
   async checkPortAvailable(port) {
     debug('CHECKING PORT AVAILABLE', port);
+
     try {
       const { stdout, stderr } = await exec(`lsof -i:${port}`);
-      if (
-        stdout && stdout.match(/LISTEN/gmi)
-      ) {
+      if (stdout && stdout.match(/LISTEN/gmi)) {
         debug(`PORT ${port} IS BUSY`)
         return false;
       }
-    } catch (e) { }
+    } catch (e) {}
     debug(`PORT ${port} IS OPEN`);
+
     return true;
   }
 
@@ -503,7 +525,7 @@ class GoLogin {
 
   async getTimeZone(proxy) {
     debug('getting timeZone proxy=', proxy);
-    if(this.timezone){
+    if (this.timezone) {
       debug('getTimeZone from options', this.timezone);
       this._tz = this.timezone;
       return this._tz.timezone;
@@ -600,7 +622,7 @@ class GoLogin {
 
   async spawnBrowser() {
     let remote_debugging_port = this.remote_debugging_port;
-    if(!remote_debugging_port){
+    if (!remote_debugging_port) {
       remote_debugging_port = await this.getRandomPort();
     } 
     
@@ -709,7 +731,9 @@ class GoLogin {
     if (this.is_stopping) {
       return true;
     }
-    const is_posting = options.postings || false;
+    const is_posting = options.posting ||
+      options.postings || // backward compability
+      false;
 
     if (this.uploadCookiesToServer) {
       await this.uploadProfileCookiesToServer();
@@ -785,34 +809,31 @@ class GoLogin {
 
   async getProfileDataToUpdate() {
     const zipPath = path.join(this.tmpdir, `gologin_${this.profile_id}_upload.zip`);
-    try {
-      fs.unlinkSync(zipPath);
+    const zipExists = await access(zipPath).then(() => true).catch(() => false);
+    if (zipExists) {
+      await unlink(zipPath);
     }
-    catch (e) {
-    }
+
     await this.sanitizeProfile();
     debug('profile sanitized');
-    await new Promise(resolve => {
-      debug('begin zipping');
-      execFile(`cd ${this.profilePath()}; /usr/bin/zip`, [
-        `-r ${zipPath}`,
-        '*'
-      ], {
-        shell: true
-      }, () => {
-        debug('zipping done');
-        resolve();
-      });
-    });
-    debug('PROFILE ZIP CREATED', this.profilePath(), zipPath);
-    try {
-      const data = fs.readFileSync(zipPath);
-      return data;
-    }
-    catch (e) {
-      debug('saveprofile error', e);
-      return '';
-    }
+
+    const profilePath = this.profilePath();
+    const fileBuff = await new Promise((resolve, reject) => zipdir(profilePath,
+      {
+        saveTo: zipPath,
+        filter: (path) => !/RunningChromeVersion/.test(path),
+      }, (err, buffer) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        resolve(buffer);
+      })
+    )
+
+    debug('PROFILE ZIP CREATED', profilePath, zipPath);
+    return fileBuff;
   }
 
   async profileExists() {
@@ -856,11 +877,11 @@ class GoLogin {
     const fingerprint = await this.getRandomFingerprint(options);
     debug("fingerprint=", fingerprint)
     
-    if(fingerprint.statusCode == 500){
+    if (fingerprint.statusCode === 500) {
       throw new Error("no valid random fingerprint check os param");
     }
 
-    if(fingerprint.statusCode == 401){
+    if (fingerprint.statusCode === 401) {
       throw new Error("invalid token");
     }
 
@@ -890,7 +911,7 @@ class GoLogin {
     let user_agent = options.navigator?.userAgent;
     let orig_user_agent = json.navigator.userAgent;
     Object.keys(options).map((e)=>{ json[e] = options[e] });
-    if(user_agent=='random'){
+    if (user_agent === 'random') {
       json.navigator.userAgent = orig_user_agent;
     }
     // console.log('profileOptions', json);
@@ -903,11 +924,11 @@ class GoLogin {
       json,
     });
 
-    if(response.body.statusCode==400){
+    if (response.body.statusCode === 400) {
       throw new Error(`gologin failed account creation with status code, ${data.statusCode} DATA  ${JSON.stringify(response.body.message)}`);
     }
 
-    if(response.body.statusCode==500){
+    if (response.body.statusCode === 500) {
       throw new Error(`gologin failed account creation with status code, ${data.statusCode}`);
     }
     debug(JSON.stringify(response.body));
@@ -1048,7 +1069,8 @@ class GoLogin {
     
     const ORBITA_BROWSER = this.executablePath || this.browserChecker.getOrbitaPath;
 
-    if(!fs.existsSync(ORBITA_BROWSER)){
+    const orbitaBrowserExists = await access(ORBITA_BROWSER).then(() => true).catch(() => false);
+    if (!orbitaBrowserExists) {
       throw new Error(`Orbita browser is not exists on path ${ORBITA_BROWSER}, check executablePath param`);
     }
 
@@ -1074,12 +1096,12 @@ class GoLogin {
       return this.stopRemote();
     }
 
-    await this.stopAndCommit({ posting: false }, false);
+    await this.stopAndCommit({ posting: true }, false);
   }
 
   async stopLocal(options) {
     const opts = options || { posting: false };
-    await this.stopAndCommit(options, true);
+    await this.stopAndCommit(opts, true);
   }
 
   async waitDebuggingUrl(delay_ms, try_count=0) {
@@ -1101,7 +1123,7 @@ class GoLogin {
       if (try_count < 3) {
         return this.waitDebuggingUrl(delay_ms, try_count+1);
       }
-      return { 'status': 'failure', wsUrl }
+      return { 'status': 'failure', wsUrl, 'message': 'Check proxy settings', 'profile_id': this.profile_id }
     }
 
     wsUrl = wsUrl.replace('ws://', `wss://`).replace('127.0.0.1', `${this.profile_id}.orbita.gologin.com`)
@@ -1116,7 +1138,7 @@ class GoLogin {
       }
     });
 
-    if(profileResponse.statusCode == 401){
+    if (profileResponse.statusCode === 401){
       throw new Error("invalid token");
     }
 
