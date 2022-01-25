@@ -701,6 +701,8 @@ class GoLogin {
         child = execFile(ORBITA_BROWSER, params, {env});        
       }
 
+      this.pid = child.pid;
+
       child.stdout.on('data', (data) => debug(data.toString()));
       child.stderr.on('data', (data) => debug(`ERR: ${data.toString()}`));
 
